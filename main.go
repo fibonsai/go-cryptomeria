@@ -21,7 +21,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	args := os.Args
 	if len(args) != 2 {
@@ -43,7 +47,9 @@ func main() {
 	subject := "trade"
 
 	sub := subscribe(nc, subject, &wg)
-	publish(filePath, db, nc, subject)
+	if err := publish(filePath, db, nc, subject); err != nil {
+		log.Fatal(err)
+	}
 
 	if err := nc.Drain(); err != nil {
 		log.Fatal(err)
@@ -51,7 +57,9 @@ func main() {
 
 	wg.Wait()
 
-	sub.Unsubscribe()
+	if err := sub.Unsubscribe(); err != nil {
+		log.Fatal(err)
+	}
 
 	// Check if there was an error
 	select {
@@ -85,7 +93,10 @@ func getNumRows(filePath string, db *sql.DB) int {
 	queryCount := fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", filePath)
 	numRows := 0
 	countResult := db.QueryRow(queryCount)
-	countResult.Scan(&numRows)
+	if err := countResult.Scan(&numRows); err != nil {
+		log.Fatal(err)
+		return 0
+	}
 	return numRows
 }
 
@@ -134,7 +145,11 @@ func publish(filePath string, db *sql.DB, nc *nats.Conn, subject string) error {
 			log.Fatal(err)
 		}
 	}
-	defer rows.Close()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	log.Printf("processed %d rows", counter)
 
