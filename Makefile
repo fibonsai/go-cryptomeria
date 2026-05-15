@@ -3,6 +3,7 @@ BINARY_NAME=go-cryptomeria
 GO_FILES=$(shell find . -name "*.go" -not -path "./vendor/*")
 VERSION?=1.0.0
 BUILD_DIR=bin
+TEST_DATA_DIR?="./testdata/trades.parquet"
 # Check for docker-compose vs podman-compose
 DOCKER_COMPOSE := $(shell command -v docker-compose 2> /dev/null || command -v podman-compose 2> /dev/null)
 
@@ -11,14 +12,15 @@ DOCKER_COMPOSE := $(shell command -v docker-compose 2> /dev/null || command -v p
 
 all: clean lint test build
 
+clean:
+	@echo "Cleaning up..."
+	@rm -f ./$(BUILD_DIR)/$(BINARY_NAME)
+	@go clean
+
 ## Build:
 build:
 	@echo "Building binary..."
 	go build -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY_NAME)
-
-clean:
-	@echo "Cleaning up..."
-	@go clean
 
 ## Quality Control:
 lint:
@@ -42,7 +44,7 @@ deps:
 
 ## Execution:
 run: services-up build
-	@./$(BUILD_DIR)/$(BINARY_NAME)
+	@./$(BUILD_DIR)/$(BINARY_NAME) $(TEST_DATA_DIR)
 
 ## Docker:
 docker-build:
