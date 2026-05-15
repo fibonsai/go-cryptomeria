@@ -16,6 +16,7 @@ import (
 )
 
 const READER_DELAY = 1000 * time.Nanosecond
+const DATA_CHANNEL_BUFFER_SIZE = 1000000
 
 func main() {
 	args := os.Args
@@ -34,32 +35,16 @@ func main() {
 		cancel()
 	}()
 
-	db, err := sql.Open("duckdb", "")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		if err := db.Close(); err != nil {
-			log.Fatal(err)
-		}
-	}()
-
-	numRows := getNumRows(filePath, db)
-	log.Printf("num rows: %d", numRows)
-
-	nc := newNatsConn()
-	defer nc.Close()
-
 	subject := "trade"
 
-	go subscriber(ctx, nc, subject)
-	go parquetReader(ctx, filePath, db, nc, subject)
+	go subscriber(ctx, subject, func(counter int, subject string, trade *TradeDao) {
+		log.Printf("%d %s %s", counter, subject, trade)
+	})
+
+	go parquetReader(ctx, filePath, subject)
 
 	<-ctx.Done()
 
-	if err := nc.Drain(); err != nil {
-		log.Fatal(err)
-	}
 }
 
 func getNumRows(filePath string, db *sql.DB) int32 {
@@ -84,8 +69,10 @@ func newNatsConn() *nats.Conn {
 	return nc
 }
 
-func subscriber(ctx context.Context, nc *nats.Conn, subject string) {
-	dataCh := make(chan *nats.Msg, 1000000)
+func subscriber(ctx context.Context, subject string, handler func(c int, subj string, t *TradeDao)) {
+	nc := newNatsConn()
+	defer nc.Close()
+	dataCh := make(chan *nats.Msg, DATA_CHANNEL_BUFFER_SIZE)
 	sub, err := nc.ChanSubscribe(subject, dataCh)
 	if err != nil {
 		log.Fatal("Failed to subscribe to subject:", err)
@@ -93,6 +80,9 @@ func subscriber(ctx context.Context, nc *nats.Conn, subject string) {
 	defer func() {
 		sub.Unsubscribe()
 		close(dataCh)
+		if err := nc.Drain(); err != nil {
+			log.Fatal(err)
+		}
 	}()
 
 	counter := 0
@@ -108,23 +98,38 @@ func subscriber(ctx context.Context, nc *nats.Conn, subject string) {
 				trade := &TradeDao{}
 				if err := proto.Unmarshal(m.Data, trade); err != nil {
 					log.Fatal(err)
-
 				}
 				counter++
-				log.Printf("%d %s %s", counter, m.Subject, trade)
+				handler(counter, m.Subject, trade)
 			}
 		}
 	}
 }
 
-func parquetReader(ctx context.Context, filePath string, db *sql.DB, nc *nats.Conn, subject string) {
+func parquetReader(ctx context.Context, filePath string, subject string) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	numRows := getNumRows(filePath, db)
+	log.Printf("num rows: %d", numRows)
+
+	nc := newNatsConn()
 	query := fmt.Sprintf("SELECT timestamp, side, id, price, amount FROM read_parquet('%s')", filePath)
 	rows, err := db.Query(query)
 	if err != nil {
 		log.Fatalf("Query error: %v", err)
 	}
+	
 	defer func() {
 		if err := rows.Close(); err != nil {
+			log.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			log.Fatal(err)
+		}
+		if err := nc.Drain(); err != nil {
 			log.Fatal(err)
 		}
 	}()
