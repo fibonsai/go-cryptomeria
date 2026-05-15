@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"os"
-	"sync"
-	"sync/atomic"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 )
+
+const READER_DELAY = 1000 * time.Nanosecond
 
 func main() {
 	args := os.Args
@@ -22,7 +25,15 @@ func main() {
 	}
 	filePath := args[1]
 
-	// 2. Initialize Database
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		sigChannel := make(chan os.Signal, 1)
+		signal.Notify(sigChannel, os.Interrupt, syscall.SIGTERM)
+		<-sigChannel
+		close(sigChannel)
+		cancel()
+	}()
+
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		log.Fatal(err)
@@ -33,45 +44,27 @@ func main() {
 		}
 	}()
 
-	errCh := make(chan error, 1)
 	numRows := getNumRows(filePath, db)
 	log.Printf("num rows: %d", numRows)
 
-	var wg sync.WaitGroup
-	wg.Add(numRows)
-
-	nc := newNatsConn(&wg, errCh)
+	nc := newNatsConn()
 	defer nc.Close()
 
 	subject := "trade"
-	sub := subscribe(nc, subject, &wg)
 
-	if err := publish(filePath, db, nc, subject); err != nil {
-		log.Fatal(err)
-	}
+	go subscriber(ctx, nc, subject)
+	go parquetReader(ctx, filePath, db, nc, subject)
+
+	<-ctx.Done()
 
 	if err := nc.Drain(); err != nil {
 		log.Fatal(err)
 	}
-
-	wg.Wait()
-
-	if !nc.IsClosed() {
-		if err := sub.Unsubscribe(); err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	select {
-	case e := <-errCh:
-		log.Fatal(e)
-	default:
-	}
 }
 
-func getNumRows(filePath string, db *sql.DB) int {
+func getNumRows(filePath string, db *sql.DB) int32 {
 	queryCount := fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", filePath)
-	numRows := 0
+	var numRows int32 = 0
 	countResult := db.QueryRow(queryCount)
 	if err := countResult.Scan(&numRows); err != nil {
 		log.Fatal(err)
@@ -80,19 +73,10 @@ func getNumRows(filePath string, db *sql.DB) int {
 	return numRows
 }
 
-func newNatsConn(wg *sync.WaitGroup, errCh chan error) *nats.Conn {
+func newNatsConn() *nats.Conn {
 	nc, err := nats.Connect(nats.DefaultURL,
-		nats.ConnectHandler(func(c *nats.Conn) {
-			wg.Add(1)
-		}),
-		// ATTENTION: large buffer may drop messages
-		nats.WriteBufferSize(10),
-		nats.DrainTimeout(10*time.Second),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			errCh <- err
-		}),
-		nats.ClosedHandler(func(_ *nats.Conn) {
-			wg.Done()
+			log.Fatal(err)
 		}))
 	if err != nil {
 		log.Fatal(err)
@@ -100,31 +84,44 @@ func newNatsConn(wg *sync.WaitGroup, errCh chan error) *nats.Conn {
 	return nc
 }
 
-func subscribe(nc *nats.Conn, subject string, wg *sync.WaitGroup) *nats.Subscription {
-	var counter atomic.Int32
-	counter.Store(0)
-
-	sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
-		trade := &TradeDao{}
-		defer wg.Done()
-		if err := proto.Unmarshal(m.Data, trade); err != nil {
-			log.Fatal(err)
-			return
-		}
-		log.Printf("%d %s %s", counter.Add(1), m.Subject, trade)
-	})
+func subscriber(ctx context.Context, nc *nats.Conn, subject string) {
+	dataCh := make(chan *nats.Msg, 1000000)
+	sub, err := nc.ChanSubscribe(subject, dataCh)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Failed to subscribe to subject:", err)
 	}
-	return sub
+	defer func() {
+		sub.Unsubscribe()
+		close(dataCh)
+	}()
+
+	counter := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("exiting from consumer")
+			return
+
+		case m := <-dataCh:
+			{
+				trade := &TradeDao{}
+				if err := proto.Unmarshal(m.Data, trade); err != nil {
+					log.Fatal(err)
+
+				}
+				counter++
+				log.Printf("%d %s %s", counter, m.Subject, trade)
+			}
+		}
+	}
 }
 
-func publish(filePath string, db *sql.DB, nc *nats.Conn, subject string) error {
+func parquetReader(ctx context.Context, filePath string, db *sql.DB, nc *nats.Conn, subject string) {
 	query := fmt.Sprintf("SELECT timestamp, side, id, price, amount FROM read_parquet('%s')", filePath)
 	rows, err := db.Query(query)
 	if err != nil {
-		log.Printf("Query error: %v", err)
-		return err
+		log.Fatalf("Query error: %v", err)
 	}
 	defer func() {
 		if err := rows.Close(); err != nil {
@@ -133,25 +130,39 @@ func publish(filePath string, db *sql.DB, nc *nats.Conn, subject string) error {
 	}()
 
 	counter := 0
-	for rows.Next() {
-		trade := &TradeDao{}
-		if err := rows.Scan(&trade.Timestamp, &trade.Side, &trade.Id, &trade.Price, &trade.Amount); err != nil {
-			log.Printf("Scan error: %v", err)
-			continue
-		}
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("exiting from producer")
+			log.Printf("processed %d rows", counter)
+			return
+		default:
+			{
+				if rows.Next() {
+					time.Sleep(READER_DELAY)
+					trade := &TradeDao{}
+					if err := rows.Scan(&trade.Timestamp, &trade.Side, &trade.Id, &trade.Price, &trade.Amount); err != nil {
+						log.Printf("Scan error: %v", err)
+						continue
+					}
 
-		tradeRaw, err := proto.Marshal(trade)
-		if err != nil {
-			log.Fatal(err)
-			continue
-		}
+					tradeRaw, err := proto.Marshal(trade)
+					if err != nil {
+						log.Fatal(err)
+						continue
+					}
 
-		counter++
-		if err := nc.Publish(subject, tradeRaw); err != nil {
-			log.Fatal(err)
+					counter++
+					if err := nc.Publish(subject, tradeRaw); err != nil {
+						log.Fatal(err)
+					}
+				} else {
+					log.Printf("All rows processed. Total %d rows", counter)
+					log.Println("exiting from producer")
+					return
+				}
+			}
 		}
 	}
 
-	log.Printf("processed %d rows", counter)
-	return nil
 }
