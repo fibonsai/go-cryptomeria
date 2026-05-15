@@ -15,8 +15,14 @@ import (
 )
 
 func main() {
-	errCh := make(chan error, 1)
+	args := os.Args
+	if len(args) != 2 {
+		log.Fatal("argument missing.")
+		return
+	}
+	filePath := args[1]
 
+	// 2. Initialize Database
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		log.Fatal(err)
@@ -27,26 +33,19 @@ func main() {
 		}
 	}()
 
-	args := os.Args
-	if len(args) != 2 {
-		log.Fatal("argument missing.")
-		return
-	}
-	filePath := os.Args[1] // "~/dev/github.com/fibonsai/xtratej/adapter/adapter-duckdb/src/test/resources/trades.parquet"
-
+	errCh := make(chan error, 1)
 	numRows := getNumRows(filePath, db)
 	log.Printf("num rows: %d", numRows)
 
-	wg := sync.WaitGroup{}
+	var wg sync.WaitGroup
 	wg.Add(numRows)
 
-	// Connect to a server
 	nc := newNatsConn(&wg, errCh)
 	defer nc.Close()
 
 	subject := "trade"
-
 	sub := subscribe(nc, subject, &wg)
+
 	if err := publish(filePath, db, nc, subject); err != nil {
 		log.Fatal(err)
 	}
@@ -57,11 +56,12 @@ func main() {
 
 	wg.Wait()
 
-	if err := sub.Unsubscribe(); err != nil {
-		log.Fatal(err)
+	if !nc.IsClosed() {
+		if err := sub.Unsubscribe(); err != nil {
+			log.Fatal(err)
+		}
 	}
 
-	// Check if there was an error
 	select {
 	case e := <-errCh:
 		log.Fatal(e)
@@ -69,12 +69,23 @@ func main() {
 	}
 }
 
+func getNumRows(filePath string, db *sql.DB) int {
+	queryCount := fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", filePath)
+	numRows := 0
+	countResult := db.QueryRow(queryCount)
+	if err := countResult.Scan(&numRows); err != nil {
+		log.Fatal(err)
+		return 0
+	}
+	return numRows
+}
+
 func newNatsConn(wg *sync.WaitGroup, errCh chan error) *nats.Conn {
 	nc, err := nats.Connect(nats.DefaultURL,
 		nats.ConnectHandler(func(c *nats.Conn) {
 			wg.Add(1)
 		}),
-		// ATENTION: large buffer may drop messages
+		// ATTENTION: large buffer may drop messages
 		nats.WriteBufferSize(10),
 		nats.DrainTimeout(10*time.Second),
 		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
@@ -87,17 +98,6 @@ func newNatsConn(wg *sync.WaitGroup, errCh chan error) *nats.Conn {
 		log.Fatal(err)
 	}
 	return nc
-}
-
-func getNumRows(filePath string, db *sql.DB) int {
-	queryCount := fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", filePath)
-	numRows := 0
-	countResult := db.QueryRow(queryCount)
-	if err := countResult.Scan(&numRows); err != nil {
-		log.Fatal(err)
-		return 0
-	}
-	return numRows
 }
 
 func subscribe(nc *nats.Conn, subject string, wg *sync.WaitGroup) *nats.Subscription {
@@ -126,32 +126,32 @@ func publish(filePath string, db *sql.DB, nc *nats.Conn, subject string) error {
 		log.Printf("Query error: %v", err)
 		return err
 	}
-
-	counter := 0
-
-	for rows.Next() {
-		trade := &TradeDao{}
-		if err := rows.Scan(&trade.Timestamp, &trade.Side, &trade.Id, &trade.Price, &trade.Amount); err != nil {
-			log.Printf("Scan error: %v", err)
-			continue
-		}
-		tradeRaw, err := proto.Marshal(trade)
-		if err != nil {
-			log.Fatal(err)
-			continue
-		}
-		counter++
-		if err := nc.Publish(subject, tradeRaw); err != nil {
-			log.Fatal(err)
-		}
-	}
 	defer func() {
 		if err := rows.Close(); err != nil {
 			log.Fatal(err)
 		}
 	}()
 
-	log.Printf("processed %d rows", counter)
+	counter := 0
+	for rows.Next() {
+		trade := &TradeDao{}
+		if err := rows.Scan(&trade.Timestamp, &trade.Side, &trade.Id, &trade.Price, &trade.Amount); err != nil {
+			log.Printf("Scan error: %v", err)
+			continue
+		}
 
+		tradeRaw, err := proto.Marshal(trade)
+		if err != nil {
+			log.Fatal(err)
+			continue
+		}
+
+		counter++
+		if err := nc.Publish(subject, tradeRaw); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	log.Printf("processed %d rows", counter)
 	return nil
 }
