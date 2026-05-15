@@ -1,0 +1,12 @@
+syntax = "proto3";
+package main;
+
+option go_package = "./;main";
+
+message TradeDao {
+  int64 timestamp = 1;
+  string side = 2;
+  string id = 3;
+  double price = 4;
+  double amount = 5;
+}
