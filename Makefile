@@ -60,7 +60,7 @@ services-up:
 		exit 1; \
 	fi
 	@echo "Starting services using $(DOCKER_COMPOSE)..."
-	$(DOCKER_COMPOSE) up -d
+	$(DOCKER_COMPOSE) up -d --force-recreate
 
 services-down:
 	@if [ -z "$(DOCKER_COMPOSE)" ]; then \
