@@ -8,17 +8,28 @@ import (
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
-	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 )
 
-const READER_DELAY = 1000 * time.Nanosecond
+const READER_DELAY = 0
 const DATA_CHANNEL_BUFFER_SIZE = 1000000
 
 type MarketDataParquet struct {
 	filepath string
 	subject  string
 	ctx      context.Context
+	dataCh   chan *[]byte
+}
+
+func NewMarketDataParquet(filepath string, subject string, ctx context.Context) *MarketDataParquet {
+	ch := make(chan *[]byte, DATA_CHANNEL_BUFFER_SIZE)
+
+	return &MarketDataParquet{
+		filepath: filepath,
+		subject:  subject,
+		ctx:      ctx,
+		dataCh:   ch,
+	}
 }
 
 func (mdp *MarketDataParquet) getNumRows(db *sql.DB) int32 {
@@ -32,32 +43,11 @@ func (mdp *MarketDataParquet) getNumRows(db *sql.DB) int32 {
 	return numRows
 }
 
-func (mdp *MarketDataParquet) newNatsConn() *nats.Conn {
-	nc, err := nats.Connect(nats.DefaultURL,
-		nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-			log.Fatal(err)
-		}))
-	if err != nil {
-		log.Fatal(err)
-	}
-	return nc
+func (mdp *MarketDataParquet) Stop() {
+	close(mdp.dataCh)
 }
 
 func (mdp *MarketDataParquet) Subscriber(handler func(c int, subj string, t *TradeDao)) {
-	nc := mdp.newNatsConn()
-	defer nc.Close()
-	dataCh := make(chan *nats.Msg, DATA_CHANNEL_BUFFER_SIZE)
-	sub, err := nc.ChanSubscribe(mdp.subject, dataCh)
-	if err != nil {
-		log.Fatal("Failed to subscribe to subject:", err)
-	}
-	defer func() {
-		sub.Unsubscribe()
-		close(dataCh)
-		if err := nc.Drain(); err != nil {
-			log.Fatal(err)
-		}
-	}()
 
 	counter := 0
 
@@ -67,14 +57,14 @@ func (mdp *MarketDataParquet) Subscriber(handler func(c int, subj string, t *Tra
 			log.Println("exiting from consumer")
 			return
 
-		case m := <-dataCh:
+		case m := <-mdp.dataCh:
 			{
 				trade := &TradeDao{}
-				if err := proto.Unmarshal(m.Data, trade); err != nil {
+				if err := proto.Unmarshal(*m, trade); err != nil {
 					log.Fatal(err)
 				}
 				counter++
-				handler(counter, m.Subject, trade)
+				handler(counter, mdp.subject, trade)
 			}
 		}
 	}
@@ -89,7 +79,6 @@ func (mdp *MarketDataParquet) Start() {
 	numRows := mdp.getNumRows(db)
 	log.Printf("num rows: %d", numRows)
 
-	nc := mdp.newNatsConn()
 	query := fmt.Sprintf("SELECT timestamp, side, id, price, amount FROM read_parquet('%s')", mdp.filepath)
 	rows, err := db.Query(query)
 	if err != nil {
@@ -101,9 +90,6 @@ func (mdp *MarketDataParquet) Start() {
 			log.Fatal(err)
 		}
 		if err := db.Close(); err != nil {
-			log.Fatal(err)
-		}
-		if err := nc.Drain(); err != nil {
 			log.Fatal(err)
 		}
 	}()
@@ -118,7 +104,9 @@ func (mdp *MarketDataParquet) Start() {
 		default:
 			{
 				if rows.Next() {
-					time.Sleep(READER_DELAY)
+					if READER_DELAY > 0 {
+						time.Sleep(READER_DELAY)
+					}
 					trade := &TradeDao{}
 					if err := rows.Scan(&trade.Timestamp, &trade.Side, &trade.Id, &trade.Price, &trade.Amount); err != nil {
 						log.Printf("Scan error: %v", err)
@@ -132,9 +120,7 @@ func (mdp *MarketDataParquet) Start() {
 					}
 
 					counter++
-					if err := nc.Publish(mdp.subject, tradeRaw); err != nil {
-						log.Fatal(err)
-					}
+					mdp.dataCh <- &tradeRaw
 				} else {
 					log.Printf("All rows processed. Total %d rows", counter)
 					log.Println("exiting from producer")

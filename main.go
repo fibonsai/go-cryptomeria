@@ -11,6 +11,7 @@ import (
 type MarketData interface {
 	Subscriber(func(counter int, subject string, trade *TradeDao))
 	Start()
+	Stop()
 }
 
 var marketData MarketData
@@ -34,11 +35,7 @@ func main() {
 		cancel()
 	}()
 
-	marketData = &MarketDataParquet{
-		ctx:      ctx,
-		subject:  subject,
-		filepath: filepath,
-	}
+	marketData = NewMarketDataParquet(filepath, subject, ctx)
 
 	go marketData.Subscriber(func(counter int, subject string, trade *TradeDao) {
 		log.Printf("%d %s %s", counter, subject, trade)
@@ -47,4 +44,6 @@ func main() {
 	go marketData.Start()
 
 	<-ctx.Done()
+
+	marketData.Stop()
 }
