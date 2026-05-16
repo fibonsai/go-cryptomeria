@@ -14,13 +14,8 @@ type IngestionService struct {
 }
 
 type Asset struct {
-	closePrices map[int64]*ClosePrices
-	keys        []int64
-}
-
-type ClosePrices struct {
-	timestamp int64
-	value     float64
+	Prices map[int64]float64
+	keys   []int64
 }
 
 func NewIngestionService(windowSize int32, slopeMin float32, debug bool) *IngestionService {
@@ -38,29 +33,29 @@ func (is *IngestionService) onPriceTicket(asset string, price float64, timestamp
 	anAsset, ok := is.assets[asset]
 	if !ok {
 		anAsset = &Asset{
-			closePrices: make(map[int64]*ClosePrices, is.windowSize+1),
-			keys:        make([]int64, 0, is.windowSize+1),
+			Prices: make(map[int64]float64, is.windowSize+1),
+			keys:   make([]int64, 0, is.windowSize+1),
 		}
 		is.assets[asset] = anAsset
 
 		anAsset.keys = append(anAsset.keys, timeSlot)
-		anAsset.closePrices[timeSlot] = &ClosePrices{timestamp: timeSlot, value: price}
+		anAsset.Prices[timeSlot] = price
 		return
 	}
 
 	lastTimeSlot := anAsset.keys[len(anAsset.keys)-1]
 	if lastTimeSlot < timeSlot {
 		anAsset.keys = append(anAsset.keys, timeSlot)
-		anAsset.closePrices[timeSlot] = &ClosePrices{timestamp: timeSlot, value: price}
+		anAsset.Prices[timeSlot] = price
 
 		if len(anAsset.keys) > int(is.windowSize) {
 			for range len(anAsset.keys) - int(is.windowSize) {
 				firstKey := anAsset.keys[0]
-				delete(anAsset.closePrices, firstKey)
+				delete(anAsset.Prices, firstKey)
 				anAsset.keys = anAsset.keys[1:]
 			}
 
-			triggered, slope := is.isThresholdCalled(&anAsset.keys, &anAsset.closePrices)
+			triggered, slope := is.isThresholdCalled(&anAsset.keys, &anAsset.Prices)
 			if triggered {
 				thresholdHandler(slope)
 			}
@@ -68,16 +63,16 @@ func (is *IngestionService) onPriceTicket(asset string, price float64, timestamp
 	}
 }
 
-func (is *IngestionService) isThresholdCalled(keys *[]int64, closePrices *map[int64]*ClosePrices) (bool, float64) {
+func (is *IngestionService) isThresholdCalled(keys *[]int64, prices *map[int64]float64) (bool, float64) {
 	var weights []float64
 	avgX := make([]float64, 0, len(*keys))
 	avgY := make([]float64, 0, len(*keys))
 
 	for _, key := range *keys {
-		closePrice, ok := (*closePrices)[int64(key)]
+		price, ok := (*prices)[int64(key)]
 		if ok {
-			avgX = append(avgX, float64(closePrice.timestamp)-float64((*closePrices)[(*keys)[0]].timestamp))
-			avgY = append(avgY, closePrice.value)
+			avgX = append(avgX, float64(key)-float64((*keys)[0]))
+			avgY = append(avgY, price)
 		}
 	}
 

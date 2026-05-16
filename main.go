@@ -26,7 +26,7 @@ func main() {
 
 	debug := false
 
-	subject := "trade"
+	asset := "BTCUSD"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -37,15 +37,15 @@ func main() {
 		cancel()
 	}()
 
-	marketData = NewMarketDataParquet(filepath, subject, ctx)
+	marketData = NewMarketDataParquet(filepath, asset, ctx)
 	ingestionService := NewIngestionService(60, -40.0, false)
 
-	go marketData.Subscriber(func(counter int, subject string, trade *TradeDao) {
+	go marketData.Subscriber(func(counter int, asset string, trade *TradeDao) {
 		if debug {
-			log.Printf("%d %s %s", counter, subject, trade)
+			log.Printf("%d %s %s", counter, asset, trade)
 		}
-		ingestionService.onPriceTicket(subject, trade.Price, trade.Timestamp, func(threshold float64) {
-			log.Printf("threshold called at %d. Slope is %f", trade.Timestamp, threshold)
+		ingestionService.onPriceTicket(asset, trade.Price, trade.Timestamp, func(threshold float64) {
+			log.Printf("[%d] Slope is %f. Reference Price is %f to Asset %s", trade.Timestamp, threshold, trade.Price, asset)
 		})
 	})
 

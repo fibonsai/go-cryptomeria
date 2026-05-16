@@ -16,17 +16,17 @@ const DATA_CHANNEL_BUFFER_SIZE = 1000000
 
 type MarketDataParquet struct {
 	filepath string
-	subject  string
+	asset    string
 	ctx      context.Context
 	dataCh   chan *[]byte
 }
 
-func NewMarketDataParquet(filepath string, subject string, ctx context.Context) *MarketDataParquet {
+func NewMarketDataParquet(filepath string, asset string, ctx context.Context) *MarketDataParquet {
 	ch := make(chan *[]byte, DATA_CHANNEL_BUFFER_SIZE)
 
 	return &MarketDataParquet{
 		filepath: filepath,
-		subject:  subject,
+		asset:    asset,
 		ctx:      ctx,
 		dataCh:   ch,
 	}
@@ -47,7 +47,7 @@ func (mdp *MarketDataParquet) Stop() {
 	close(mdp.dataCh)
 }
 
-func (mdp *MarketDataParquet) Subscriber(handler func(c int, subj string, t *TradeDao)) {
+func (mdp *MarketDataParquet) Subscriber(handler func(counter int, asset string, trade *TradeDao)) {
 
 	counter := 0
 
@@ -64,7 +64,7 @@ func (mdp *MarketDataParquet) Subscriber(handler func(c int, subj string, t *Tra
 					log.Fatal(err)
 				}
 				counter++
-				handler(counter, mdp.subject, trade)
+				handler(counter, mdp.asset, trade)
 			}
 		}
 	}
