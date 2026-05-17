@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -9,9 +10,22 @@ import (
 )
 
 type MarketData interface {
-	Subscriber(func(counter int, subject string, trade *TradeDao))
+	Subscriber(func(counter int, subject string, trade *Trade))
 	Start()
 	Stop()
+}
+
+type Trade struct {
+	asset     string
+	timestamp int64
+	side      string
+	id        string
+	price     float64
+	amount    float64
+}
+
+func (t *Trade) String() string {
+	return fmt.Sprintf("{asset: %s, timestamp: %d, side: %s, id: %s, price: %f, amount: %f}", t.asset, t.timestamp, t.side, t.id, t.price, t.amount)
 }
 
 var marketData MarketData
@@ -39,13 +53,20 @@ func main() {
 
 	marketData = NewMarketDataParquet(filepath, asset, ctx)
 	ingestionService := NewIngestionService(60, -40.0, false)
+	preTradeService := NewPreTradeService(10)
+	technicalIndicatorService := NewTechnicalIndicatorService()
 
-	go marketData.Subscriber(func(counter int, asset string, trade *TradeDao) {
+	go marketData.Subscriber(func(counter int, asset string, trade *Trade) {
 		if debug {
-			log.Printf("%d %s %s", counter, asset, trade)
+			log.Printf("%d %s", counter, trade)
 		}
-		ingestionService.onPriceTicket(asset, trade.Price, trade.Timestamp, func(threshold float64) {
-			log.Printf("[%d] Slope is %f. Reference Price is %f to Asset %s", trade.Timestamp, threshold, trade.Price, asset)
+		technicalIndicatorService.update(trade)
+
+		ingestionService.onPriceTicket(trade, func(threshold float64) {
+			if debug {
+				log.Printf("[%d] Slope is %f. Reference Price is %f to Asset %s", trade.timestamp, threshold, trade.price, trade.asset)
+			}
+			preTradeService.StartMonitor(trade)
 		})
 	})
 

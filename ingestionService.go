@@ -27,26 +27,26 @@ func NewIngestionService(windowSize int32, slopeMin float32, debug bool) *Ingest
 	}
 }
 
-func (is *IngestionService) onPriceTicket(asset string, price float64, timestamp int64, thresholdHandler func(threshold float64)) {
-	timeSlot := int64(timestamp / (60 * 1_000)) // convert timestamp to minutes
+func (is *IngestionService) onPriceTicket(trade *Trade, thresholdHandler func(threshold float64)) {
+	timeSlot := int64(trade.timestamp / (60 * 1_000)) // convert timestamp to minutes
 
-	anAsset, ok := is.assets[asset]
+	anAsset, ok := is.assets[trade.asset]
 	if !ok {
 		anAsset = &Asset{
 			Prices: make(map[int64]float64, is.windowSize+1),
 			keys:   make([]int64, 0, is.windowSize+1),
 		}
-		is.assets[asset] = anAsset
+		is.assets[trade.asset] = anAsset
 
 		anAsset.keys = append(anAsset.keys, timeSlot)
-		anAsset.Prices[timeSlot] = price
+		anAsset.Prices[timeSlot] = trade.price
 		return
 	}
 
 	lastTimeSlot := anAsset.keys[len(anAsset.keys)-1]
 	if lastTimeSlot < timeSlot {
 		anAsset.keys = append(anAsset.keys, timeSlot)
-		anAsset.Prices[timeSlot] = price
+		anAsset.Prices[timeSlot] = trade.price
 
 		if len(anAsset.keys) > int(is.windowSize) {
 			for range len(anAsset.keys) - int(is.windowSize) {

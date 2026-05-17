@@ -47,7 +47,7 @@ func (mdp *MarketDataParquet) Stop() {
 	close(mdp.dataCh)
 }
 
-func (mdp *MarketDataParquet) Subscriber(handler func(counter int, asset string, trade *TradeDao)) {
+func (mdp *MarketDataParquet) Subscriber(handler func(counter int, asset string, trade *Trade)) {
 
 	counter := 0
 
@@ -59,12 +59,19 @@ func (mdp *MarketDataParquet) Subscriber(handler func(counter int, asset string,
 
 		case m := <-mdp.dataCh:
 			{
-				trade := &TradeDao{}
-				if err := proto.Unmarshal(*m, trade); err != nil {
+				tradeDao := &TradeDao{}
+				if err := proto.Unmarshal(*m, tradeDao); err != nil {
 					log.Fatal(err)
 				}
 				counter++
-				handler(counter, mdp.asset, trade)
+				handler(counter, mdp.asset, &Trade{
+					asset:     mdp.asset,
+					timestamp: tradeDao.Timestamp,
+					side:      tradeDao.Side,
+					id:        tradeDao.Id,
+					price:     tradeDao.Price,
+					amount:    tradeDao.Amount,
+				})
 			}
 		}
 	}
