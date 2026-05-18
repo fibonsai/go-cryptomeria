@@ -16,7 +16,7 @@ func NewPreTradeService(intervalToCheck time.Duration) *PreTradeService {
 	return &PreTradeService{
 		intervalToCheck:           intervalToCheck,
 		assetsMonitored:           make(map[string]*TickerManager),
-		technicalIndicatorService: NewTechnicalIndicatorService(),
+		technicalIndicatorService: NewTechnicalIndicatorService(60),
 	}
 }
 
@@ -33,6 +33,10 @@ func (pts *PreTradeService) StartMonitor(refTrade *Trade) {
 	}
 
 	assetMonitored.Start()
+}
+
+func (pts *PreTradeService) Update(trade *Trade) {
+	pts.technicalIndicatorService.Update(trade)
 }
 
 // ##############
@@ -52,14 +56,9 @@ func NewTickerManager(asset string, interval time.Duration, technicalIndicatorSe
 }
 
 func (t *TickerManager) Start() {
-	t.ticker = time.NewTicker(t.interval)
-	defer t.ticker.Stop()
-
-	for range t.ticker.C {
-		t.technicalIndicatorService.forecastTrendReversal(t.asset, 60)
-
-		timer := time.NewTimer(5 * time.Second)
-		<-timer.C
-		break
-	}
+	t.technicalIndicatorService.Start(func(trendForecast *TrendForecast, trade *Trade) {
+		if trendForecast.willReverse && trendForecast.confidence > 0.8 && trendForecast.isDownTrend && trendForecast.trendStrengIndex < 0.2 {
+			// lets do it
+		}
+	})
 }

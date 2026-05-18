@@ -54,20 +54,18 @@ func main() {
 	marketData = NewMarketDataParquet(filepath, asset, ctx)
 	ingestionService := NewIngestionService(60, -40.0, false)
 	preTradeService := NewPreTradeService(10)
-	technicalIndicatorService := NewTechnicalIndicatorService()
+
+	ingestionService.Start(func(trade *Trade, threshold float64) {
+		preTradeService.StartMonitor(trade)
+	})
+	defer ingestionService.Stop()
 
 	go marketData.Subscriber(func(counter int, asset string, trade *Trade) {
 		if debug {
 			log.Printf("%d %s", counter, trade)
 		}
-		technicalIndicatorService.update(trade)
-
-		ingestionService.onPriceTicket(trade, func(threshold float64) {
-			if debug {
-				log.Printf("[%d] Slope is %f. Reference Price is %f to Asset %s", trade.timestamp, threshold, trade.price, trade.asset)
-			}
-			preTradeService.StartMonitor(trade)
-		})
+		ingestionService.onPriceTicket(trade)
+		preTradeService.Update(trade)
 	})
 
 	go marketData.Start()

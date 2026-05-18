@@ -7,10 +7,11 @@ import (
 )
 
 type IngestionService struct {
-	windowSize int32
-	SlopeMin   float32
-	assets     map[string]*Asset
-	debug      bool
+	windowSize   int32
+	SlopeMin     float64
+	debug        bool
+	windowSlider *WindowSlider
+	stopCh       chan bool
 }
 
 type Asset struct {
@@ -18,69 +19,67 @@ type Asset struct {
 	keys   []int64
 }
 
-func NewIngestionService(windowSize int32, slopeMin float32, debug bool) *IngestionService {
+func NewIngestionService(windowSize int32, slopeMin float64, debug bool) *IngestionService {
 	return &IngestionService{
-		windowSize: windowSize,
-		SlopeMin:   slopeMin,
-		assets:     make(map[string]*Asset),
-		debug:      debug,
+		windowSize:   windowSize,
+		SlopeMin:     slopeMin,
+		debug:        debug,
+		windowSlider: NewWindowSlider(int(windowSize), 60_000),
+		stopCh:       make(chan bool, 1),
 	}
 }
 
-func (is *IngestionService) onPriceTicket(trade *Trade, thresholdHandler func(threshold float64)) {
-	timeSlot := int64(trade.timestamp / (60 * 1_000)) // convert timestamp to minutes
-
-	anAsset, ok := is.assets[trade.asset]
-	if !ok {
-		anAsset = &Asset{
-			Prices: make(map[int64]float64, is.windowSize+1),
-			keys:   make([]int64, 0, is.windowSize+1),
-		}
-		is.assets[trade.asset] = anAsset
-
-		anAsset.keys = append(anAsset.keys, timeSlot)
-		anAsset.Prices[timeSlot] = trade.price
-		return
-	}
-
-	lastTimeSlot := anAsset.keys[len(anAsset.keys)-1]
-	if lastTimeSlot < timeSlot {
-		anAsset.keys = append(anAsset.keys, timeSlot)
-		anAsset.Prices[timeSlot] = trade.price
-
-		if len(anAsset.keys) > int(is.windowSize) {
-			for range len(anAsset.keys) - int(is.windowSize) {
-				firstKey := anAsset.keys[0]
-				delete(anAsset.Prices, firstKey)
-				anAsset.keys = anAsset.keys[1:]
-			}
-
-			triggered, slope := is.isThresholdCalled(&anAsset.keys, &anAsset.Prices)
-			if triggered {
-				thresholdHandler(slope)
+func (is *IngestionService) Start(thresholdHandler func(trade *Trade, threshold float64)) {
+	go func() {
+		for {
+			select {
+			case tradeWindow := <-is.windowSlider.C():
+				last := len(tradeWindow.timestamps) - 1
+				trade := &Trade{
+					asset:     tradeWindow.asset,
+					timestamp: tradeWindow.timestamps[last],
+					price:     tradeWindow.prices[last],
+					amount:    tradeWindow.amounts[last],
+				}
+				beta := is.calculateSlope(tradeWindow)
+				if beta < is.SlopeMin {
+					thresholdHandler(trade, beta)
+				}
+			case <-is.stopCh:
+				return
 			}
 		}
-	}
+	}()
 }
 
-func (is *IngestionService) isThresholdCalled(keys *[]int64, prices *map[int64]float64) (bool, float64) {
+func (is *IngestionService) Stop() {
+	// drain channel
+loop:
+	for {
+		select {
+		case <-is.windowSlider.C():
+		default:
+			break loop
+		}
+	}
+	is.windowSlider.Stop()
+	is.stopCh <- true
+}
+
+func (is *IngestionService) onPriceTicket(trade *Trade) {
+	is.windowSlider.Update(trade)
+}
+
+func (is *IngestionService) calculateSlope(tradeWindow *TradeWindow) float64 {
 	var weights []float64
-	avgX := make([]float64, 0, len(*keys))
-	avgY := make([]float64, 0, len(*keys))
+	posX := tradeWindow.seqs
+	prices := tradeWindow.prices
 
-	for _, key := range *keys {
-		price, ok := (*prices)[int64(key)]
-		if ok {
-			avgX = append(avgX, float64(key)-float64((*keys)[0]))
-			avgY = append(avgY, price)
-		}
-	}
-
-	_, beta := stat.LinearRegression(avgX, avgY, weights, false)
+	_, beta := stat.LinearRegression(posX, prices, weights, false)
 
 	if is.debug {
-		log.Printf("[%d] slope: %f", len(*keys), beta)
+		log.Printf("[%d] slope: %f, x: %v y: %v", len(posX), beta, posX, prices)
 	}
 
-	return beta < float64(is.SlopeMin), beta
+	return beta
 }
